@@ -293,10 +293,13 @@ class YoudaoNotePull(object):
                 logging.info("{}「{}」{}".format(file_action.value, local_file_path, tip))
 
             # 本地文件时间设置为有道云笔记的时间
-            if platform.system() == "Windows":
-                setctime(local_file_path, create_time)
+            if os.path.exists(local_file_path):
+                if platform.system() == "Windows":
+                    setctime(local_file_path, create_time)
+                else:
+                    os.utime(local_file_path, (create_time, modify_time))
             else:
-                os.utime(local_file_path, (create_time, modify_time))
+                logging.warning("文件未生成，跳过设置时间: %s", local_file_path)
 
         except Exception as error:
             logging.info(
@@ -310,37 +313,49 @@ class YoudaoNotePull(object):
     ):
         """
         下载文件
-        :param file_id:
-        :param file_path:
-        :param local_file_path: 本地
-        :param file_type:
-        :param youdao_file_suffix:
-        :return:
         """
-        # 1、所有的都先下载
+        # 1. 下载文件
         response = self.youdaonote_api.get_file_by_id(file_id)
+        if response is None:
+            logging.error("下载文件失败（API返回None），file_id: %s", file_id)
+            return
         with open(file_path, "wb") as f:
-            f.write(response.content)  # response.content 本身就是字节类型
+            f.write(response.content)
 
-        # 2、如果文件是 note 类型，将其转换为 MarkDown 类型
+        # 2. 转换（如果类型是 XML 或 JSON）
         if file_type == FileType.XML:
             try:
                 YoudaoNoteConvert.covert_xml_to_markdown(file_path)
             except ET.ParseError:
-                logging.info("此 note 笔记应该为 17 年以前新建，格式为 html，将转换为 Markdown ...")
-                YoudaoNoteConvert.covert_html_to_markdown(file_path)
+                logging.info("XML格式异常，改用HTML模式转换")
+                try:
+                    YoudaoNoteConvert.covert_html_to_markdown(file_path)
+                except Exception as e:
+                    logging.error("HTML转换也失败: %s", repr(e))
             except Exception as e:
-                logging.info("note 笔记转换 MarkDown 失败，将跳过", repr(e))
+                logging.error("XML转换失败: %s", repr(e))
+                try:
+                    YoudaoNoteConvert.covert_html_to_markdown(file_path)
+                except Exception as e2:
+                    logging.error("HTML兜底转换失败: %s", repr(e2))
         elif file_type == FileType.JSON:
-            YoudaoNoteConvert.covert_json_to_markdown(file_path)
+            try:
+                YoudaoNoteConvert.covert_json_to_markdown(file_path)
+            except Exception as e:
+                logging.error("JSON转换失败: %s", repr(e))
 
-        # 3、迁移文本文件里面的有道云笔记图片（链接）
+        # 3. 图片迁移（单独捕获异常，避免影响文件本身）
         if file_type != FileType.OTHER or youdao_file_suffix == MARKDOWN_SUFFIX:
-            imagePull = ImagePull(
-                self.youdaonote_api, self.smms_secret_token, self.is_relative_path
-            )
-            imagePull.migration_ydnote_url(local_file_path)
-
+            if os.path.exists(local_file_path):
+                try:
+                    imagePull = ImagePull(
+                        self.youdaonote_api, self.smms_secret_token, self.is_relative_path
+                    )
+                    imagePull.migration_ydnote_url(local_file_path)
+                except Exception as e:
+                    logging.error("图片迁移失败（文件 %s）: %s", local_file_path, repr(e))
+            else:
+                logging.warning("转换后未生成 Markdown 文件，跳过图片迁移: %s", file_path)
 
 if __name__ == "__main__":
     log.init_logging()
